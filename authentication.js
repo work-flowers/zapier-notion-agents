@@ -11,7 +11,7 @@ module.exports = {
       label: 'Personal Access Token',
       type: 'password',
       helpText:
-        'Create a personal access token with the "Notion API" capability at https://www.notion.so/profile/integrations and copy the token (starts with `ntn_`). The Notion Agent APIs are in public beta.',
+        'Create a personal access token with the "Notion API" capability at https://www.notion.so/developers/tokens and copy it (starts with `ntn_`). A personal access token is required to reach your personal agent (Notion AI), and it can also reach every Custom Agent you can access in Notion. Tokens expire (at most after 1 year): reconnect with a new one before then.',
     },
   ],
   customConfig: {},
