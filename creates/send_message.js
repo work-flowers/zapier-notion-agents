@@ -1,5 +1,6 @@
 const {
   BASE_URL,
+  PERSONAL_AGENT_ID,
   MAX_WAIT_SECONDS,
   DEFAULT_WAIT_SECONDS,
   clampWaitSeconds,
@@ -9,12 +10,29 @@ const {
   eventsAfter,
   waitForSession,
   buildReplyResult,
+  retrieveSession,
 } = require('../lib/session');
+const { applyPersonalModel, SKIPPED_MODEL_FIELDS } = require('../lib/agents');
 const { replySample, replyOutputFields } = require('../lib/reply_fields');
 
+// Zapier's limit is 30 s for the whole action. Everything before the reply
+// fetch (session lookup, model read/update, send, polling) must end by this
+// point, leaving room for the event fetch.
+const TOTAL_BUDGET_SECONDS = 24;
+
 const perform = async (z, bundle, deps = {}) => {
-  const { agent_id, session_id, message, prompt_context, metadata, wait_seconds } =
-    bundle.inputData;
+  const now = deps.now || Date.now;
+  const startedAt = now();
+  const {
+    agent_id,
+    session_id,
+    message,
+    prompt_context,
+    metadata,
+    wait_seconds,
+    model_mode,
+    model_id,
+  } = bundle.inputData;
 
   if (!message || !String(message).trim()) {
     throw new z.errors.Error('Message is required.', 'invalid_input', 400);
@@ -27,13 +45,25 @@ const perform = async (z, bundle, deps = {}) => {
     );
   }
 
+  // Which agent will answer? For a follow-up, the session decides.
+  const targetAgent = session_id
+    ? (await retrieveSession(z, session_id)).agent_id
+    : String(agent_id).trim();
+
+  // Model: personal agent only. A Custom Agent's model is never touched,
+  // because changing it would also publish a new agent version.
+  const modelFields =
+    targetAgent === PERSONAL_AGENT_ID
+      ? await applyPersonalModel(z, model_mode, model_id)
+      : SKIPPED_MODEL_FIELDS;
+
   // Baseline: everything after this sequence is the new turn.
   const baseline = session_id ? await latestSequence(z, session_id) : 0;
 
   const body = {
     message: String(message),
     metadata: buildMetadata(metadata, bundle.meta?.zap?.id),
-    ...(session_id ? { session_id } : { agent_id }),
+    ...(session_id ? { session_id } : { agent_id: targetAgent }),
     ...(prompt_context ? { prompt_context: String(prompt_context) } : {}),
   };
 
@@ -47,16 +77,22 @@ const perform = async (z, bundle, deps = {}) => {
   // treat the step as failed and a replay would send the message twice.
   // Return what we have and let Get Agent Reply fetch the rest.
   try {
-    const session = await waitForSession(z, created.id, clampWaitSeconds(wait_seconds), {
+    const elapsedSeconds = (now() - startedAt) / 1000;
+    const waitBudget = Math.min(
+      clampWaitSeconds(wait_seconds),
+      Math.max(0, Math.floor(TOTAL_BUDGET_SECONDS - elapsedSeconds)),
+    );
+    const session = await waitForSession(z, created.id, waitBudget, {
       initial: created,
       ...deps,
     });
     const events = await eventsAfter(z, created.id, baseline);
-    return buildReplyResult(session, events, baseline);
+    return { ...buildReplyResult(session, events, baseline), ...modelFields };
   } catch (err) {
     z.console.log(`Message sent to session ${created.id}; reply fetch failed: ${err.message}`);
     return {
       ...buildReplyResult(created, [], baseline),
+      ...modelFields,
       error_message: `Message sent, but the reply could not be fetched yet (${err.message}). Use Get Agent Reply with this session ID.`,
     };
   }
@@ -116,15 +152,55 @@ module.exports = {
           'Optional key/value tags stored on the session. `source=zapier` and the Zap ID are always added.',
       },
       {
+        key: 'model_mode',
+        label: 'Model (Personal Agent Only)',
+        type: 'string',
+        required: false,
+        default: 'auto',
+        choices: {
+          auto: 'Auto (Notion chooses per run)',
+          pinned: 'Pinned (enter a Model ID below)',
+          unchanged: "Don't change the agent's setting",
+        },
+        helpText:
+          "Applies only to your personal agent (Notion AI); ignored for Custom Agents. The model is a setting on the agent, not on one message, so this changes your personal agent's model everywhere, including chats in the Notion app. It is only updated when it differs from the current setting. Defaults to Auto.",
+      },
+      {
+        key: 'model_id',
+        label: 'Pinned Model ID',
+        type: 'string',
+        required: false,
+        helpText:
+          'Only used when Model is **Pinned**. Run **Get Agent** to see the exact ID of a model, e.g. the one your personal agent is currently pinned to.',
+      },
+      {
         key: 'wait_seconds',
         label: 'Wait for Reply (Seconds)',
         type: 'integer',
         required: false,
         default: String(DEFAULT_WAIT_SECONDS),
-        helpText: `How long to wait for the agent to answer, 0 to ${MAX_WAIT_SECONDS}. If it is still working when time runs out, the step succeeds with **Agent Finished?** = false; use **Get Agent Reply** later with the session ID and **Last Event Sequence**.`,
+        helpText: `How long to wait for the agent to answer, 0 to ${MAX_WAIT_SECONDS}. If it is still working when time runs out, the step succeeds with **Agent Finished?** = false; use **Get Agent Reply** later with the session ID and **Last Event Sequence**. The wait is shortened automatically if earlier steps of this action took a while, to stay inside Zapier's 30-second limit.`,
       },
     ],
-    sample: replySample,
-    outputFields: replyOutputFields,
+    sample: {
+      ...replySample,
+      model_setting: 'already_set',
+      model_mode: 'auto',
+      model_id: null,
+      previous_model_mode: 'auto',
+      previous_model_id: null,
+    },
+    outputFields: [
+      ...replyOutputFields,
+      {
+        key: 'model_setting',
+        label: 'Model Setting Result (changed/already_set/unchanged/skipped_custom_agent)',
+        type: 'string',
+      },
+      { key: 'model_mode', label: 'Agent Model Mode', type: 'string' },
+      { key: 'model_id', label: 'Agent Pinned Model ID', type: 'string' },
+      { key: 'previous_model_mode', label: 'Previous Model Mode', type: 'string' },
+      { key: 'previous_model_id', label: 'Previous Pinned Model ID', type: 'string' },
+    ],
   },
 };

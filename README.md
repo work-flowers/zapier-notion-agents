@@ -28,6 +28,20 @@ Agents answer asynchronously, and a Zapier action has ~30 seconds. `send_message
 - Once the message has been sent, `send_message` never fails the step: a failure while fetching the reply is reported in `error_message` instead, so a Zapier replay cannot send the message twice.
 - Every session is tagged with metadata `source=zapier` and the Zap's id.
 
+### Choosing the model (personal agent only)
+
+Notion has no per-message model: the model is a setting on the agent. So **Send Message to Agent** has a **Model** field (Auto by default, Pinned with a Model ID, or Don't change). When the message goes to the personal agent, the action reads `notion_ai`'s setting and, only if it differs, updates it (`PATCH /v1/agents/notion_ai`) *before* sending. Consequences:
+
+- It changes your personal agent's model everywhere, including chats in the Notion app.
+- Concurrent runs asking for different models can race; the setting is global.
+- **Custom Agents are never touched** (`model_setting: skipped_custom_agent`): changing a Custom Agent's model also publishes a new agent version.
+- Output fields `model_setting` (`changed` / `already_set` / `unchanged` / `skipped_custom_agent`), `model_mode`, `model_id` and `previous_model_*` record what happened.
+- The reply wait is shortened automatically if the lookup and model calls took a while, so the whole action stays inside Zapier's 30-second limit.
+
+### Errors
+
+Errors keep a readable message and append Notion's own words, e.g. `[Notion: HTTP 403 | workspace_credits_exhausted | … | recovery_kind=… | request_id=…]`, so support tickets can quote the API exactly. Send/reply results also carry the session's `error_code`, `error_message` and `error_retryable` when a run fails inside Notion.
+
 By default the transcript contains only `user.message` and `agent.message` events. Enable **Include Full Detail?** to also include `agent.thinking`, `agent.tool_use`, and `agent.tool_result` events.
 
 ## Authentication
