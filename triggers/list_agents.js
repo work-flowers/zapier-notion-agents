@@ -1,14 +1,9 @@
 const { queryAll } = require('../lib/api');
+const { toDropdownItem, sortPersonalFirst } = require('../lib/agents');
 
 const perform = async (z, bundle) => {
   const agents = await queryAll(z, 'https://api.notion.com/v1/agents/query');
-
-  return agents.map((agent) => ({
-    id: agent.id,
-    name: agent.name || 'Untitled agent',
-    description: agent.description || null,
-    agent_type: agent.agent_type,
-  }));
+  return sortPersonalFirst(agents.map(toDropdownItem));
 };
 
 module.exports = {
