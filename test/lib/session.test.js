@@ -359,3 +359,30 @@ describe('searches.get_agent', () => {
     await expect(getAgent.operation.perform(z, { inputData: { agent_id: 'nope' } })).rejects.toThrow(/personal access token/);
   });
 });
+
+// ---------- set_agent_model ----------
+
+describe('creates.set_agent_model', () => {
+  const setModel = require('../../creates/set_agent_model');
+  const { buildModelBody } = require('../../lib/agents');
+
+  it('builds auto and pinned bodies and rejects bad input', () => {
+    expect(buildModelBody('auto')).toEqual({ model: { mode: 'auto' } });
+    expect(buildModelBody(undefined)).toEqual({ model: { mode: 'auto' } });
+    expect(buildModelBody('Pinned', ' gpt-x ')).toEqual({ model: { mode: 'pinned', id: 'gpt-x' } });
+    expect(() => buildModelBody('pinned', '')).toThrow(/Model ID is required/);
+    expect(() => buildModelBody('fast')).toThrow(/auto" or "pinned/);
+  });
+
+  it('PATCHes the personal agent by default and returns the flattened agent', async () => {
+    const z = makeZ((req) => ({ data: { object: 'agent', id: 'notion_ai', agent_type: 'notion_ai', model: req.body.model } }));
+    const r = await setModel.operation.perform(z, { inputData: { model_mode: 'auto' } });
+    expect(z.calls[0]).toMatchObject({ method: 'PATCH', url: 'https://api.notion.com/v1/agents/notion_ai', body: { model: { mode: 'auto' } } });
+    expect(r).toMatchObject({ model_mode: 'auto', model_id: null });
+  });
+
+  it('turns bad input into a Zapier error without calling Notion', async () => {
+    const z = makeZ(() => { throw new Error('should not be called'); });
+    await expect(setModel.operation.perform(z, { inputData: { model_mode: 'pinned' } })).rejects.toThrow(/Model ID is required/);
+  });
+});

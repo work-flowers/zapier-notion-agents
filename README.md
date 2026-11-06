@@ -10,6 +10,7 @@ Zapier platform integration for the [Notion Agent APIs](https://developers.notio
 | Trigger (hidden) | `list_sessions` | Populates the session dropdown, optionally scoped by agent (`POST /v1/sessions/query`) |
 | Search | `get_session_transcript` | Returns session metadata plus a `messages` array and a plain-text `transcript` (`GET /v1/sessions/{id}` + `POST /v1/sessions/{id}/events/query`) |
 | Create | `send_message` | Starts a chat with an agent or continues one (`POST /v1/sessions`), then waits up to `wait_seconds` (max 20) for the reply |
+| Create | `set_agent_model` | Sets an agent's model to Auto or pins one (`PATCH /v1/agents/{id}`), defaulting to `notion_ai`. Changes the setting everywhere, including Notion app chats |
 | Search | `get_agent` | Returns an agent's settings (`GET /v1/agents/{id}`), defaulting to `notion_ai`, with `model_mode` (`auto`/`pinned`) and `model_id` flattened out |
 | Search | `get_agent_reply` | Returns the agent's reply after a given event sequence, optionally waiting for the turn to finish. Always returns one result |
 
