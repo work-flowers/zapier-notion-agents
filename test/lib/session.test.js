@@ -220,6 +220,7 @@ describe('creates.send_message', () => {
 
   it('starts a new personal-agent session and returns the reply', async () => {
     const z = makeZ((req) => {
+      if (req.url.endsWith('/v1/agents/notion_ai')) return { data: { id: 'notion_ai', model: { mode: 'auto' } } };
       if (req.method === 'POST' && req.url.endsWith('/v1/sessions')) {
         return { data: { id: 's1', agent_id: 'notion_ai', status: 'queued' } };
       }
@@ -288,6 +289,7 @@ describe('creates.send_message', () => {
 
   it('never throws after the message was sent (no duplicate on replay)', async () => {
     const z = makeZ((req) => {
+      if (req.url.endsWith('/v1/agents/notion_ai')) return { data: { id: 'notion_ai', model: { mode: 'auto' } } };
       if (req.method === 'POST' && req.url.endsWith('/v1/sessions')) return { data: { id: 's3', status: 'queued' } };
       return { status: 429, data: { code: 'rate_limited' }, headers: { 'retry-after': '1' } };
     });
@@ -357,5 +359,168 @@ describe('searches.get_agent', () => {
   it('maps a 404 to the PAT hint', async () => {
     const z = makeZ(() => ({ status: 404, data: { code: 'object_not_found' } }));
     await expect(getAgent.operation.perform(z, { inputData: { agent_id: 'nope' } })).rejects.toThrow(/personal access token/);
+  });
+});
+
+// ---------- set_agent_model ----------
+
+describe('creates.set_agent_model', () => {
+  const setModel = require('../../creates/set_agent_model');
+  const { buildModelBody } = require('../../lib/agents');
+
+  it('builds auto and pinned bodies and rejects bad input', () => {
+    expect(buildModelBody('auto')).toEqual({ model: { mode: 'auto' } });
+    expect(buildModelBody(undefined)).toEqual({ model: { mode: 'auto' } });
+    expect(buildModelBody('Pinned', ' gpt-x ')).toEqual({ model: { mode: 'pinned', id: 'gpt-x' } });
+    expect(() => buildModelBody('pinned', '')).toThrow(/Model ID is required/);
+    expect(() => buildModelBody('fast')).toThrow(/auto" or "pinned/);
+  });
+
+  it('PATCHes the personal agent by default and returns the flattened agent', async () => {
+    const z = makeZ((req) => ({ data: { object: 'agent', id: 'notion_ai', agent_type: 'notion_ai', model: req.body.model } }));
+    const r = await setModel.operation.perform(z, { inputData: { model_mode: 'auto' } });
+    expect(z.calls[0]).toMatchObject({ method: 'PATCH', url: 'https://api.notion.com/v1/agents/notion_ai', body: { model: { mode: 'auto' } } });
+    expect(r).toMatchObject({ model_mode: 'auto', model_id: null });
+  });
+
+  it('turns bad input into a Zapier error without calling Notion', async () => {
+    const z = makeZ(() => { throw new Error('should not be called'); });
+    await expect(setModel.operation.perform(z, { inputData: { model_mode: 'pinned' } })).rejects.toThrow(/Model ID is required/);
+  });
+});
+
+// ---------- 1.4.0: per-run model (personal agent only) + raw errors ----------
+
+describe('send_message pre-send failures', () => {
+  it('a 429 on the model read throws (retryable) before anything is sent', async () => {
+    const z = makeZ((req) => (req.url.endsWith('/v1/agents/notion_ai')
+      ? { status: 429, data: { code: 'rate_limited' }, headers: { 'retry-after': '3' } }
+      : { data: { id: 's1', status: 'queued' } }));
+    await expect(sendMessage.operation.perform(z, { inputData: { agent_id: 'notion_ai', message: 'x' } }, noWait))
+      .rejects.toBeInstanceOf(FakeThrottledError);
+    expect(z.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+});
+
+describe('send_message model handling', () => {
+  const perform = sendMessage.operation.perform;
+
+  // Router with a stateful personal-agent model and a simple session.
+  const makeRouter = ({ model = { mode: 'pinned', id: 'gpt-5.6-sol' }, sessionAgent = 'notion_ai' } = {}) => {
+    const state = { model };
+    return (req) => {
+      if (req.url.endsWith('/v1/agents/notion_ai')) {
+        if (req.method === 'PATCH') state.model = req.body.model;
+        return { data: { object: 'agent', id: 'notion_ai', agent_type: 'notion_ai', model: state.model } };
+      }
+      if (req.method === 'POST' && req.url.endsWith('/v1/sessions')) {
+        return { data: { id: 's9', agent_id: req.body.agent_id || sessionAgent, status: 'queued' } };
+      }
+      if (isEventsQuery(req)) return { data: { results: [], has_more: false } };
+      return { data: { id: 's9', agent_id: sessionAgent, status: 'completed' } };
+    };
+  };
+  const order = (z) => z.calls.map((c) => `${c.method || 'GET'} ${c.url.replace('https://api.notion.com/v1', '')}`);
+
+  it('defaults to Auto: reads, then PATCHes a pinned personal agent BEFORE sending', async () => {
+    const z = makeZ(makeRouter());
+    const r = await perform(z, { inputData: { agent_id: 'notion_ai', message: 'hi' } }, noWait);
+    const calls = order(z);
+    expect(calls.indexOf('PATCH /agents/notion_ai')).toBeGreaterThan(-1);
+    expect(calls.indexOf('PATCH /agents/notion_ai')).toBeLessThan(calls.indexOf('POST /sessions'));
+    expect(z.calls.find((c) => c.method === 'PATCH').body).toEqual({ model: { mode: 'auto' } });
+    expect(r).toMatchObject({
+      model_setting: 'changed',
+      model_mode: 'auto',
+      previous_model_mode: 'pinned',
+      previous_model_id: 'gpt-5.6-sol',
+    });
+  });
+
+  it('does not PATCH when the setting already matches', async () => {
+    const z = makeZ(makeRouter({ model: { mode: 'auto' } }));
+    const r = await perform(z, { inputData: { agent_id: 'notion_ai', message: 'hi', model_mode: 'auto' } }, noWait);
+    expect(z.calls.some((c) => c.method === 'PATCH')).toBe(false);
+    expect(r.model_setting).toBe('already_set');
+  });
+
+  it('pins a model when asked, and skips the PATCH if already pinned to it', async () => {
+    const z = makeZ(makeRouter({ model: { mode: 'auto' } }));
+    const r = await perform(z, { inputData: { agent_id: 'notion_ai', message: 'hi', model_mode: 'pinned', model_id: 'gpt-x' } }, noWait);
+    expect(r).toMatchObject({ model_setting: 'changed', model_mode: 'pinned', model_id: 'gpt-x' });
+
+    const z2 = makeZ(makeRouter({ model: { mode: 'pinned', id: 'gpt-x' } }));
+    const r2 = await perform(z2, { inputData: { agent_id: 'notion_ai', message: 'hi', model_mode: 'pinned', model_id: 'gpt-x' } }, noWait);
+    expect(z2.calls.some((c) => c.method === 'PATCH')).toBe(false);
+    expect(r2.model_setting).toBe('already_set');
+  });
+
+  it('"unchanged" never PATCHes but reports the current setting', async () => {
+    const z = makeZ(makeRouter());
+    const r = await perform(z, { inputData: { agent_id: 'notion_ai', message: 'hi', model_mode: 'unchanged' } }, noWait);
+    expect(z.calls.some((c) => c.method === 'PATCH')).toBe(false);
+    expect(r).toMatchObject({ model_setting: 'unchanged', model_mode: 'pinned', model_id: 'gpt-5.6-sol' });
+  });
+
+  it('never touches a Custom Agent model, even when Pinned is requested', async () => {
+    const z = makeZ(makeRouter());
+    const r = await perform(z, { inputData: { agent_id: 'custom-123', message: 'hi', model_mode: 'pinned', model_id: 'gpt-x' } }, noWait);
+    expect(z.calls.some((c) => c.url.includes('/agents/'))).toBe(false);
+    expect(r.model_setting).toBe('skipped_custom_agent');
+  });
+
+  it('applies the model when continuing a personal-agent session (agent read from the session)', async () => {
+    const z = makeZ(makeRouter({ sessionAgent: 'notion_ai' }));
+    const r = await perform(z, { inputData: { session_id: 's9', message: 'more' } }, noWait);
+    expect(order(z)[0]).toBe('GET /sessions/s9');
+    expect(r.model_setting).toBe('changed');
+    const post = z.calls.find((c) => c.method === 'POST' && c.url.endsWith('/v1/sessions'));
+    expect(post.body).not.toHaveProperty('agent_id');
+  });
+
+  it('skips the model when continuing a Custom Agent session', async () => {
+    const z = makeZ(makeRouter({ sessionAgent: 'custom-123' }));
+    const r = await perform(z, { inputData: { session_id: 's9', message: 'more', model_mode: 'auto' } }, noWait);
+    expect(z.calls.some((c) => c.url.includes('/agents/'))).toBe(false);
+    expect(r.model_setting).toBe('skipped_custom_agent');
+  });
+
+  it('rejects Pinned without an ID before sending anything', async () => {
+    const z = makeZ(makeRouter());
+    await expect(perform(z, { inputData: { agent_id: 'notion_ai', message: 'hi', model_mode: 'pinned' } }, noWait)).rejects.toThrow(/Model ID is required/);
+    expect(z.calls.some((c) => c.method === 'POST' && c.url.endsWith('/v1/sessions'))).toBe(false);
+  });
+
+  it('shrinks the wait when earlier calls used up the time budget', async () => {
+    let t = 0;
+    const z = makeZ((req) => {
+      t += 12000; // each call "takes" 12 s
+      return makeRouter({ model: { mode: 'auto' } })(req);
+    });
+    await perform(z, { inputData: { agent_id: 'notion_ai', message: 'hi', wait_seconds: 20 } }, { sleepFn: async () => {}, now: () => t });
+    // GET agent + POST = 24 s elapsed, so no polling: no GET /sessions/s9 at all.
+    expect(z.calls.some((c) => (c.method || 'GET') === 'GET' && c.url.endsWith('/sessions/s9'))).toBe(false);
+  });
+});
+
+describe('raw Notion error detail', () => {
+  it('appends Notion code, message and recovery kind to friendly messages', () => {
+    const d = describeNotionError(403, {
+      code: 'workspace_credits_exhausted',
+      message: 'Workspace is out of credits.',
+      request_id: 'req_1',
+      additional_data: { recovery_kind: 'contact_workspace_owner' },
+    });
+    expect(d.message).toMatch(/^The Notion workspace has run out of AI credits\./);
+    expect(d.message).toContain('[Notion: HTTP 403 | workspace_credits_exhausted | Workspace is out of credits. | recovery_kind=contact_workspace_owner | request_id=req_1]');
+  });
+
+  it('exposes the session error code on reply results', () => {
+    const r = buildReplyResult(
+      { id: 's1', status: 'failed', error: { code: 'agent_credit_limit_reached', message: 'Limit', retryable: false } },
+      [],
+      0,
+    );
+    expect(r).toMatchObject({ error_code: 'agent_credit_limit_reached', error_message: 'Limit', error_retryable: false });
   });
 });

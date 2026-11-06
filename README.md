@@ -10,6 +10,7 @@ Zapier platform integration for the [Notion Agent APIs](https://developers.notio
 | Trigger (hidden) | `list_sessions` | Populates the session dropdown, optionally scoped by agent (`POST /v1/sessions/query`) |
 | Search | `get_session_transcript` | Returns session metadata plus a `messages` array and a plain-text `transcript` (`GET /v1/sessions/{id}` + `POST /v1/sessions/{id}/events/query`) |
 | Create | `send_message` | Starts a chat with an agent or continues one (`POST /v1/sessions`), then waits up to `wait_seconds` (max 20) for the reply |
+| Create | `set_agent_model` | Sets an agent's model to Auto or pins one (`PATCH /v1/agents/{id}`), defaulting to `notion_ai`. Changes the setting everywhere, including Notion app chats |
 | Search | `get_agent` | Returns an agent's settings (`GET /v1/agents/{id}`), defaulting to `notion_ai`, with `model_mode` (`auto`/`pinned`) and `model_id` flattened out |
 | Search | `get_agent_reply` | Returns the agent's reply after a given event sequence, optionally waiting for the turn to finish. Always returns one result |
 
@@ -26,6 +27,20 @@ Agents answer asynchronously, and a Zapier action has ~30 seconds. `send_message
 - Status `requires_action` means the agent is waiting for an approval in Notion (`required_actions` lists them).
 - Once the message has been sent, `send_message` never fails the step: a failure while fetching the reply is reported in `error_message` instead, so a Zapier replay cannot send the message twice.
 - Every session is tagged with metadata `source=zapier` and the Zap's id.
+
+### Choosing the model (personal agent only)
+
+Notion has no per-message model: the model is a setting on the agent. So **Send Message to Agent** has a **Model** field (Auto by default, Pinned with a Model ID, or Don't change). When the message goes to the personal agent, the action reads `notion_ai`'s setting and, only if it differs, updates it (`PATCH /v1/agents/notion_ai`) *before* sending. Consequences:
+
+- It changes your personal agent's model everywhere, including chats in the Notion app.
+- Concurrent runs asking for different models can race; the setting is global.
+- **Custom Agents are never touched** (`model_setting: skipped_custom_agent`): changing a Custom Agent's model also publishes a new agent version.
+- Output fields `model_setting` (`changed` / `already_set` / `unchanged` / `skipped_custom_agent`), `model_mode`, `model_id` and `previous_model_*` record what happened.
+- The reply wait is shortened automatically if the lookup and model calls took a while, so the whole action stays inside Zapier's 30-second limit.
+
+### Errors
+
+Errors keep a readable message and append Notion's own words, e.g. `[Notion: HTTP 403 | workspace_credits_exhausted | … | recovery_kind=… | request_id=…]`, so support tickets can quote the API exactly. Send/reply results also carry the session's `error_code`, `error_message` and `error_retryable` when a run fails inside Notion.
 
 By default the transcript contains only `user.message` and `agent.message` events. Enable **Include Full Detail?** to also include `agent.thinking`, `agent.tool_use`, and `agent.tool_result` events.
 

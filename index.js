@@ -6,6 +6,7 @@ const getSessionTranscriptSearch = require('./searches/get_session_transcript');
 const getAgentReplySearch = require('./searches/get_agent_reply');
 const getAgentSearch = require('./searches/get_agent');
 const sendMessageCreate = require('./creates/send_message');
+const setAgentModelCreate = require('./creates/set_agent_model');
 
 module.exports = {
   version: require('./package.json').version,
@@ -23,5 +24,6 @@ module.exports = {
   },
   creates: {
     [sendMessageCreate.key]: sendMessageCreate,
+    [setAgentModelCreate.key]: setAgentModelCreate,
   },
 };
